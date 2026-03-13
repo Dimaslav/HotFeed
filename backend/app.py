@@ -2,6 +2,7 @@ import asyncio
 import json
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
+from typing import Optional, List
 
 import asyncpg
 import aioredis
@@ -9,7 +10,6 @@ from fastapi import FastAPI, Depends, HTTPException, status, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from jose import jwt
-from typing import Optional, List
 
 # ------------------ Config ------------------
 class Settings:
@@ -166,11 +166,9 @@ class PostResponse(BaseModel):
 # ------------------ Lifespan ------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
     await db.connect()
     await redis_client.connect()
     yield
-    # Shutdown
     await db.disconnect()
     await redis_client.disconnect()
 
@@ -232,17 +230,32 @@ async def create_post(post: PostCreate, current_user: dict = Depends(get_current
         current_user["id"], post.title, post.text, now
     )
     new_post = dict(row)
+    # Всегда кэшируем новый пост (он горячий)
     await redis_client.setex(f"post:{new_post['id']}", POST_CACHE_TTL, json.dumps(new_post, default=str))
     return new_post
 
 @app.get("/posts/{post_id}", response_model=PostResponse)
 async def get_post(post_id: int):
+    # Проверяем кэш
     cached = await redis_client.get(f"post:{post_id}")
     if cached:
-        return json.loads(cached)
+        post = json.loads(cached)
+        created_at = datetime.fromisoformat(post["created_at"])
+        # Если пост горячий (менее 10 минут), отдаём из кэша
+        if created_at >= datetime.utcnow() - timedelta(minutes=10):
+            return post
+        else:
+            # Пост устарел, удаляем из кэша
+            await redis_client.delete(f"post:{post_id}")
+
+    # Иначе идём в БД
     post = await get_post_from_db(post_id)
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
+
+    # Если пост горячий, кэшируем
+    if post["created_at"] >= datetime.utcnow() - timedelta(minutes=10):
+        await redis_client.setex(f"post:{post_id}", POST_CACHE_TTL, json.dumps(post, default=str))
     return post
 
 @app.patch("/posts/{post_id}", response_model=PostResponse)
@@ -270,8 +283,9 @@ async def update_post(post_id: int, post_update: PostUpdate, current_user: dict 
     query = f"UPDATE posts SET {', '.join(fields)} WHERE id = ${idx} RETURNING id, user_id, title, text, created_at, updated_at"
     row = await db.fetchrow(query, *values)
     updated = dict(row)
+    # Инвалидируем кэш
     await redis_client.delete(f"post:{post_id}")
-    # если пост всё ещё горячий, обновляем кэш
+    # Если пост всё ещё горячий, кэшируем обновлённый
     if updated['created_at'] >= datetime.utcnow() - timedelta(minutes=10):
         await redis_client.setex(f"post:{post_id}", POST_CACHE_TTL, json.dumps(updated, default=str))
     return updated
@@ -291,7 +305,6 @@ async def get_my_posts(
     limit: int = Query(10, ge=1, le=100),
     offset: int = Query(0, ge=0)
 ):
-    # Проверка кэша для всего списка не требуется по заданию (кэшируется только конкретный пост)
     await asyncio.sleep(2)  # симуляция нагрузки
     rows = await db.fetch(
         "SELECT id, user_id, title, text, created_at, updated_at FROM posts WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
