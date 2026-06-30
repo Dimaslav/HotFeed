@@ -1,87 +1,115 @@
-const API_BASE = '/api';
+const API_BASE = import.meta.env.VITE_API_BASE || '/api'
 
-let token = localStorage.getItem('token');
+let token = localStorage.getItem('token')
 
 export function setToken(newToken) {
-  token = newToken;
+  token = newToken
   if (newToken) {
-    localStorage.setItem('token', newToken);
+    localStorage.setItem('token', newToken)
   } else {
-    localStorage.removeItem('token');
+    localStorage.removeItem('token')
   }
 }
 
 export function getToken() {
-  return token;
+  return token
+}
+
+function buildHeaders(extraHeaders = {}) {
+  const headers = {
+    'Content-Type': 'application/json',
+    ...extraHeaders,
+  }
+
+  if (token) {
+    headers.Authorization = `Bearer ${token}`
+  }
+
+  return headers
 }
 
 async function request(endpoint, options = {}) {
-  const headers = {
-    'Content-Type': 'application/json',
-    ...options.headers,
-  };
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
-  }
   const res = await fetch(`${API_BASE}${endpoint}`, {
     ...options,
-    headers,
-  });
+    headers: buildHeaders(options.headers),
+  })
+
+  const contentType = res.headers.get('content-type') || ''
+
   if (!res.ok) {
-    const error = await res.json().catch(() => ({}));
-    throw new Error(error.detail || 'Ошибка запроса');
+    let message = 'Ошибка запроса'
+
+    if (contentType.includes('application/json')) {
+      const error = await res.json().catch(() => ({}))
+      message = error.detail || error.message || message
+    } else {
+      const text = await res.text().catch(() => '')
+      if (text) message = text
+    }
+
+    throw new Error(message)
   }
-  return res.json();
+
+  if (res.status === 204) {
+    return null
+  }
+
+  if (contentType.includes('application/json')) {
+    return res.json()
+  }
+
+  const text = await res.text()
+  return text ? JSON.parse(text) : null
 }
 
 export async function createUser(name) {
   return request('/users', {
     method: 'POST',
     body: JSON.stringify({ name }),
-  });
+  })
 }
 
 export async function getUserToken(userId) {
-  return request(`/users/${userId}/token`);
+  return request(`/users/${userId}/token`)
 }
 
 export async function getMe() {
-  return request('/users/me');
+  return request('/users/me')
 }
 
 export async function updateUser(name) {
   return request('/users/me', {
     method: 'PATCH',
     body: JSON.stringify({ name }),
-  });
+  })
 }
 
 export async function deleteUser() {
-  return request('/users/me', { method: 'DELETE' });
+  return request('/users/me', { method: 'DELETE' })
 }
 
 export async function createPost(title, text) {
   return request('/posts', {
     method: 'POST',
     body: JSON.stringify({ title, text }),
-  });
+  })
 }
 
 export async function getMyPosts(limit = 10, offset = 0) {
-  return request(`/users/me/posts?limit=${limit}&offset=${offset}`);
+  return request(`/users/me/posts?limit=${limit}&offset=${offset}`)
 }
 
 export async function getPost(id) {
-  return request(`/posts/${id}`);
+  return request(`/posts/${id}`)
 }
 
 export async function updatePost(id, data) {
   return request(`/posts/${id}`, {
     method: 'PATCH',
     body: JSON.stringify(data),
-  });
+  })
 }
 
 export async function deletePost(id) {
-  return request(`/posts/${id}`, { method: 'DELETE' });
+  return request(`/posts/${id}`, { method: 'DELETE' })
 }
